@@ -55,7 +55,13 @@ command -v brew >/dev/null 2>&1 || { echo "Homebrew still not on PATH — stoppi
 
 command -v gh >/dev/null 2>&1 || brew install gh
 if [[ "$ROLE" == "developer" ]]; then
-  command -v node >/dev/null 2>&1 || brew install node
+  # Version, not presence: favro-cli needs node >=18, and an old nvm version
+  # sitting first on PATH would otherwise satisfy a plain `command -v node`.
+  NODE_MAJOR="$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')"
+  if [[ -z "$NODE_MAJOR" || "$NODE_MAJOR" -lt 18 ]]; then
+    echo "Installing Node (need >=18, found ${NODE_MAJOR:-none})..."
+    brew install node
+  fi
 fi
 
 if ! gh auth status >/dev/null 2>&1; then
