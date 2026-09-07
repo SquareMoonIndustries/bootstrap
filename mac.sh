@@ -4,7 +4,7 @@
 # secrets. Installs the prerequisites, authenticates gh, hands off to the
 # private repo.
 #
-#   curl -fsSL https://raw.githubusercontent.com/SquareMoonIndustries/bootstrap/main/mac.sh | bash -s developer
+#   curl -fsSL https://raw.githubusercontent.com/SquareMoonIndustries/bootstrap/master/mac.sh | bash -s developer
 set -euo pipefail
 
 ROLE="${1:-}"
