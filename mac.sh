@@ -12,6 +12,33 @@
 # sudo prompt and `gh auth login` would read script text instead of you.
 set -euo pipefail
 
+# Without this, `set -e` exits mute: the tester sees a prompt come back with no
+# output and has nothing to report. Print where it died and what to send back.
+#
+# Deliberately no `set -E`: errtrace would propagate this into command
+# substitutions, so a failing one reports twice, and the inner run overwrites
+# $BASH_COMMAND with this function's own first line. The one function here
+# exits explicitly, so nothing is lost by not inheriting.
+on_err() {
+  local rc=$?
+  {
+    echo
+    echo "──────────────────────────────────────────────"
+    echo " Square Moon setup FAILED"
+    echo "──────────────────────────────────────────────"
+    echo " line:    ${BASH_LINENO[0]}"
+    echo " command: $BASH_COMMAND"
+    echo " exit:    $rc"
+    echo
+    echo " Copy everything above, from the command you ran,"
+    echo " and send it to Styrbjörn. Nothing is half-installed"
+    echo " in a way that breaks your machine; it is safe to"
+    echo " re-run this script after the fix."
+    echo "──────────────────────────────────────────────"
+  } >&2
+}
+trap on_err ERR
+
 ROLE="${1:-}"
 case "$ROLE" in
   developer|consultant) ;;
@@ -57,7 +84,17 @@ command -v gh >/dev/null 2>&1 || brew install gh
 if [[ "$ROLE" == "developer" ]]; then
   # Version, not presence: favro-cli needs node >=18, and an old nvm version
   # sitting first on PATH would otherwise satisfy a plain `command -v node`.
-  NODE_MAJOR="$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')"
+  #
+  # Both guards matter. With no node at all, `node -v` exits 127; `sed` exits 0;
+  # `pipefail` hands the pipeline 127; the assignment inherits it and `set -e`
+  # kills the script -- on the very line whose job is to notice node is missing,
+  # and mute, because 2>/dev/null ate the message. That is the cold path: a Mac
+  # without node could never get one installed. `|| true` covers the same shape
+  # for a node that exists but is broken.
+  NODE_MAJOR=""
+  if command -v node >/dev/null 2>&1; then
+    NODE_MAJOR="$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')" || true
+  fi
   if [[ -z "$NODE_MAJOR" || "$NODE_MAJOR" -lt 18 ]]; then
     echo "Installing Node (need >=18, found ${NODE_MAJOR:-none})..."
     brew install node
