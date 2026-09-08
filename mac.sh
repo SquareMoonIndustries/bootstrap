@@ -81,22 +81,113 @@ eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shell
 command -v brew >/dev/null 2>&1 || { echo "Homebrew still not on PATH — stopping" >&2; exit 1; }
 
 command -v gh >/dev/null 2>&1 || brew install gh
+
 if [[ "$ROLE" == "developer" ]]; then
-  # Version, not presence: favro-cli needs node >=18, and an old nvm version
-  # sitting first on PATH would otherwise satisfy a plain `command -v node`.
-  #
-  # Both guards matter. With no node at all, `node -v` exits 127; `sed` exits 0;
-  # `pipefail` hands the pipeline 127; the assignment inherits it and `set -e`
-  # kills the script -- on the very line whose job is to notice node is missing,
-  # and mute, because 2>/dev/null ate the message. That is the cold path: a Mac
-  # without node could never get one installed. `|| true` covers the same shape
-  # for a node that exists but is broken.
-  NODE_MAJOR=""
-  if command -v node >/dev/null 2>&1; then
-    NODE_MAJOR="$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')" || true
-  fi
-  if [[ -z "$NODE_MAJOR" || "$NODE_MAJOR" -lt 18 ]]; then
-    echo "Installing Node (need >=18, found ${NODE_MAJOR:-none})..."
+  # ---------------------------------------------------------------------------
+  # Runtime check: favro-cli and workstation tooling require a modern JS runtime:
+  #   - Node >= 18 (via PATH, Homebrew, NVM, FNM, ASDF, Volta, Mise, Nodenv)
+  #   - Deno (native Deno support for favro-cli is in the works; runs via Node/npm compat)
+  # ---------------------------------------------------------------------------
+
+  find_node_gte_18() {
+    local candidates=()
+    local p
+
+    # 1. Current PATH
+    if command -v node >/dev/null 2>&1; then
+      candidates+=("$(command -v node)")
+    fi
+
+    # 2. Homebrew and standard locations
+    for p in /opt/homebrew/bin/node /usr/local/bin/node; do
+      [[ -x "$p" ]] && candidates+=("$p")
+    done
+
+    # 3. Version managers (NVM, FNM, ASDF, Volta, Mise, Nodenv)
+    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    if [[ -d "$nvm_dir/versions/node" ]]; then
+      for p in "$nvm_dir"/versions/node/*/bin/node; do
+        [[ -x "$p" ]] && candidates+=("$p")
+      done
+    fi
+
+    for p in "${FNM_DIR:-$HOME/.fnm}"/current/bin/node \
+             "$HOME/.local/share/fnm/current/bin/node" \
+             "$HOME/.asdf/shims/node" \
+             "$HOME/.asdf/installs/nodejs"/*/bin/node \
+             "${VOLTA_HOME:-$HOME/.volta}/bin/node" \
+             "$HOME/.local/share/mise/installs/node"/*/bin/node \
+             "$HOME/.nodenv/shims/node" \
+             "$HOME/.nodenv/versions"/*/bin/node; do
+      [[ -x "$p" ]] && candidates+=("$p")
+    done
+
+    if [[ ${#candidates[@]} -gt 0 ]]; then
+      for p in "${candidates[@]}"; do
+        local major
+        major="$("$p" -v 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p' || true)"
+        if [[ -n "$major" && "$major" -ge 18 ]]; then
+          echo "$p"
+          return 0
+        fi
+      done
+    fi
+
+    return 1
+  }
+
+  VALID_NODE="$(find_node_gte_18 || true)"
+  DENO_BIN="$(command -v deno 2>/dev/null || { [[ -x /opt/homebrew/bin/deno ]] && echo /opt/homebrew/bin/deno; } || true)"
+
+  if [[ -n "$VALID_NODE" ]]; then
+    # Pin valid Node first on PATH so later stages use it
+    NODE_DIR="$(dirname "$VALID_NODE")"
+    export PATH="$NODE_DIR:$PATH"
+    echo "Using Node $("$VALID_NODE" -v) at $VALID_NODE"
+  elif [[ -n "$DENO_BIN" ]]; then
+    export PATH="$HOME/.deno/bin:$PATH"
+    echo "Using Deno $("$DENO_BIN" --version | head -n 1) (Node & npm compatible)"
+
+    # Note: Native Deno support for favro-cli is in the works. In the meantime,
+    # provide node/npm shims in ~/.deno/bin for any downstream tooling expecting them.
+    mkdir -p "$HOME/.deno/bin" 2>/dev/null || true
+    if [[ -d "$HOME/.deno/bin" && -w "$HOME/.deno/bin" ]]; then
+      if ! command -v node >/dev/null 2>&1; then
+        cat <<'SHIM' > "$HOME/.deno/bin/node"
+#!/bin/sh
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  exec deno eval "console.log(process.version)"
+fi
+exec deno run -A "$@"
+SHIM
+        chmod +x "$HOME/.deno/bin/node"
+      fi
+
+      if ! command -v npm >/dev/null 2>&1; then
+        cat <<'SHIM' > "$HOME/.deno/bin/npm"
+#!/bin/sh
+case "$1" in
+  install|i)
+    if [ "${2:-}" = "-g" ] || [ "${2:-}" = "--global" ]; then
+      shift 2
+      exec deno install -g -A "npm:$@"
+    fi
+    exec deno install "$@"
+    ;;
+  *)
+    exec deno x "$@"
+    ;;
+esac
+SHIM
+        chmod +x "$HOME/.deno/bin/npm"
+      fi
+    fi
+  else
+    CURRENT_NODE_VER="$(node -v 2>/dev/null || true)"
+    if [[ -n "$CURRENT_NODE_VER" ]]; then
+      echo "Existing Node version ($CURRENT_NODE_VER) is older than 18."
+    fi
+    echo "Installing Node via Homebrew (need >=18)..."
     brew install node
   fi
 fi
