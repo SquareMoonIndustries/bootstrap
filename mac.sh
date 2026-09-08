@@ -137,7 +137,13 @@ if [[ "$ROLE" == "developer" ]]; then
   }
 
   VALID_NODE="$(find_node_gte_18 || true)"
-  DENO_BIN="$(command -v deno 2>/dev/null || { [[ -x /opt/homebrew/bin/deno ]] && echo /opt/homebrew/bin/deno; } || true)"
+  DENO_BIN=""
+  for p in "$(command -v deno 2>/dev/null || true)" /opt/homebrew/bin/deno "$HOME/.deno/bin/deno" /usr/local/bin/deno; do
+    if [[ -n "$p" && -x "$p" ]]; then
+      DENO_BIN="$p"
+      break
+    fi
+  done
 
   if [[ -n "$VALID_NODE" ]]; then
     # Pin valid Node first on PATH so later stages use it
@@ -145,43 +151,132 @@ if [[ "$ROLE" == "developer" ]]; then
     export PATH="$NODE_DIR:$PATH"
     echo "Using Node $("$VALID_NODE" -v) at $VALID_NODE"
   elif [[ -n "$DENO_BIN" ]]; then
-    export PATH="$HOME/.deno/bin:$PATH"
+    mkdir -p "$HOME/.deno/bin" "$HOME/.local/bin" 2>/dev/null || true
+    export PATH="$HOME/.local/bin:$HOME/.deno/bin:$PATH"
     echo "Using Deno $("$DENO_BIN" --version | head -n 1) (Node & npm compatible)"
 
     # Note: Native Deno support for favro-cli is in the works. In the meantime,
-    # provide node/npm shims in ~/.deno/bin for any downstream tooling expecting them.
-    mkdir -p "$HOME/.deno/bin" 2>/dev/null || true
-    if [[ -d "$HOME/.deno/bin" && -w "$HOME/.deno/bin" ]]; then
-      if ! command -v node >/dev/null 2>&1; then
-        cat <<'SHIM' > "$HOME/.deno/bin/node"
+    # provide node/npm shims in ~/.local/bin and ~/.deno/bin for any downstream tooling expecting them.
+    write_shims() {
+      local dir="$1"
+      mkdir -p "$dir" 2>/dev/null || true
+      [[ -d "$dir" && -w "$dir" ]] || return 0
+
+      cat <<'SHIM' > "$dir/node"
 #!/bin/sh
+export PATH="$HOME/.deno/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
   exec deno eval "console.log(process.version)"
+elif [ "$1" = "-p" ] || [ "$1" = "--print" ]; then
+  shift
+  exec deno eval -p "$@"
+elif [ "$1" = "-e" ] || [ "$1" = "--eval" ]; then
+  shift
+  exec deno eval "$@"
+elif [ -z "$1" ]; then
+  exec deno repl
+else
+  exec deno run -A --unstable-detect-cjs "$@"
 fi
-exec deno run -A "$@"
 SHIM
-        chmod +x "$HOME/.deno/bin/node"
-      fi
+      chmod +x "$dir/node"
 
-      if ! command -v npm >/dev/null 2>&1; then
-        cat <<'SHIM' > "$HOME/.deno/bin/npm"
-#!/bin/sh
-case "$1" in
-  install|i)
-    if [ "${2:-}" = "-g" ] || [ "${2:-}" = "--global" ]; then
-      shift 2
-      exec deno install -g -A "npm:$@"
+      cat <<'SHIM' > "$dir/npm"
+#!/bin/bash
+set -e
+export PATH="$HOME/.deno/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+cmd="${1:-}"
+
+case "$cmd" in
+  install|i|add)
+    shift
+    prefix=""
+    global=0
+    tgz_files=()
+    pkgs=()
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --prefix)
+          prefix="$2"
+          shift 2
+          ;;
+        --prefix=*)
+          prefix="${1#*=}"
+          shift
+          ;;
+        -g|--global)
+          global=1
+          shift
+          ;;
+        --no-save|--no-fund|--no-audit|--save|--save-dev|--save-prod|-E|--save-exact)
+          shift
+          ;;
+        *.tgz)
+          tgz_files+=("$1")
+          shift
+          ;;
+        -*)
+          shift
+          ;;
+        *)
+          pkgs+=("$1")
+          shift
+          ;;
+      esac
+    done
+
+    if [[ ${#tgz_files[@]} -gt 0 ]]; then
+      for tgz in "${tgz_files[@]}"; do
+        if [[ ! -f "$tgz" ]]; then
+          echo "npm: tarball not found: $tgz" >&2
+          exit 1
+        fi
+
+        pkg_name="$(tar -xzf "$tgz" -O package/package.json 2>/dev/null | sed -n 's/.*"name":[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+        if [[ -z "$pkg_name" ]]; then
+          pkg_name="package"
+        fi
+
+        base_dir="${prefix:-.}"
+        mkdir -p "$base_dir"
+
+        tmp_pkg="$(mktemp -d)"
+        tar -xzf "$tgz" -C "$tmp_pkg" --strip-components=1
+
+        (cd "$tmp_pkg" && deno install -q 2>&1) || true
+
+        chmod +x "$tmp_pkg"/dist/*.js 2>/dev/null || true
+
+        dest_dir="$base_dir/node_modules/$pkg_name"
+        mkdir -p "$(dirname "$dest_dir")"
+        rm -rf "$dest_dir"
+        mv "$tmp_pkg" "$dest_dir"
+      done
+      exit 0
+    elif [[ $global -eq 1 ]]; then
+      exec deno install -g -A "npm:${pkgs[@]}"
+    elif [[ -n "$prefix" ]]; then
+      (cd "$prefix" && deno install -q "${pkgs[@]}")
+      exit 0
+    else
+      exec deno install -q "${pkgs[@]}"
     fi
-    exec deno install "$@"
+    ;;
+  -v|--version)
+    echo "10.0.0 (deno-shim)"
     ;;
   *)
     exec deno x "$@"
     ;;
 esac
 SHIM
-        chmod +x "$HOME/.deno/bin/npm"
-      fi
-    fi
+      chmod +x "$dir/npm"
+    }
+
+    write_shims "$HOME/.local/bin"
+    write_shims "$HOME/.deno/bin"
   else
     CURRENT_NODE_VER="$(node -v 2>/dev/null || true)"
     if [[ -n "$CURRENT_NODE_VER" ]]; then
