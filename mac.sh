@@ -72,12 +72,65 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! command -v brew >/dev/null 2>&1; then
+# Look for brew where it actually lives, not on PATH. A freshly installed
+# Homebrew is not on the PATH of the shell you installed it from -- the
+# installer writes /etc/paths.d/homebrew, which only a new login shell picks
+# up. `command -v brew` therefore says "missing" on a second run in the same
+# terminal, and this script would start the whole install again, sudo prompt
+# and all. A tester hit exactly that: installed Homebrew, script stopped for an
+# unrelated reason, re-ran, and was asked to install Homebrew a second time.
+find_brew() {
+  local candidate
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Persist it for the user's own shell too, so new terminals have brew without
+# them pasting the three commands Homebrew prints (which scroll past inside a
+# longer run, and which one tester mis-pasted). Idempotent, and skipped for a
+# shell whose profile we would only be guessing at.
+persist_brew() {
+  local brew_bin="$1" profile
+  case "$(basename "${SHELL:-}")" in
+    bash) profile="$HOME/.bash_profile" ;;
+    zsh)  profile="$HOME/.zprofile" ;;
+    *)
+      echo "Add this to your shell profile so new terminals find Homebrew:" >&2
+      echo "  eval \"\$($brew_bin shellenv)\"" >&2
+      return 0
+      ;;
+  esac
+  if [[ -f "$profile" ]] && grep -qF "$brew_bin shellenv" "$profile"; then
+    return 0
+  fi
+  {
+    echo
+    echo "# Added by Square Moon setup"
+    echo "eval \"\$($brew_bin shellenv)\""
+  } >> "$profile"
+  echo "Added Homebrew to $profile (takes effect in new terminals)."
+}
+
+BREW_BIN="$(find_brew || true)"
+if [[ -z "$BREW_BIN" ]]; then
   need_tty "install Homebrew"
   echo "Installing Homebrew (it will ask for your Mac password)..."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  BREW_BIN="$(find_brew || true)"
+  if [[ -n "$BREW_BIN" ]]; then
+    persist_brew "$BREW_BIN"
+  fi
 fi
-eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null || true)"
+if [[ -z "$BREW_BIN" ]]; then
+  echo "Homebrew is not at /opt/homebrew or /usr/local after installing — stopping" >&2
+  exit 1
+fi
+eval "$("$BREW_BIN" shellenv)"
 command -v brew >/dev/null 2>&1 || { echo "Homebrew still not on PATH — stopping" >&2; exit 1; }
 
 command -v gh >/dev/null 2>&1 || brew install gh
