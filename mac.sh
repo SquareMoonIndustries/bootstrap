@@ -39,6 +39,25 @@ on_err() {
 }
 trap on_err ERR
 
+# macOS only, and checked before anything else. Without this, a Linux or WSL
+# box falls into the Xcode branch below, prints "Command Line Tools are
+# installing", and exits 0 -- reporting success for an install that never
+# happened. Everything here is Darwin-specific: xcode-select, Homebrew's
+# prefixes, launchctl for the hourly agent, osascript for notifications.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  cat >&2 <<MSG
+
+This installer is for macOS only. You appear to be on $(uname -s).
+
+There is no Windows or Linux version yet. If you need the skill library on
+this machine, tell Styrbjörn -- do not try to adapt this script, and do not
+let an AI agent adapt it for you. It installs a launchd agent and uses
+Homebrew and osascript, none of which exist here.
+
+MSG
+  exit 1
+fi
+
 ROLE="${1:-}"
 case "$ROLE" in
   developer|consultant) ;;
